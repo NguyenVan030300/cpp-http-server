@@ -1,0 +1,12 @@
+# Build directories
+build/
+bin/
+obj/
+*.o
+
+# Compiled executables
+server
+*.out
+
+# VS Code workspace files (optional, but good practice)
+.vscode/
