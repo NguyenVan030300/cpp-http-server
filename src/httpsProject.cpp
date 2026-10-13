@@ -4,6 +4,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <thread>
+#include <deque>
+#include <random>
+#include <sys/time.h>
 
 constexpr int       BACKLOG = 10;
 constexpr size_t    BUFFER_SIZE = 1024;
@@ -77,6 +80,182 @@ void TcpServer::start()
     }
 }
 
+void TcpServer::runTetrisGame(int client_fd) {
+    // 1. Configure socket read timeout for game tick rate (150ms)
+    timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 150000; // 150 milliseconds per frame tick
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+}
+
+void TcpServer::runSnakeGame(int client_fd) {
+
+    // 1. Configure socket read timeout for game tick rate (150ms)
+    timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 150000; // 150 milliseconds per frame tick
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+    // Welcome banner
+    std::string welcome = "\033[2J\033[H=== C++ TCP SNAKE ARCADE ===\r\nControls: W (Up), A (Left), S (Down), D (Right) + Enter\r\nStarting game...\r\n";
+    write(client_fd, welcome.c_str(), welcome.size());
+
+    // Game Configuration
+    const int width = 20;
+    const int height = 10;
+    std::deque<std::pair<int, int>> snake = {{10, 5}, {9, 5}, {8, 5}};
+    int dx = 1;
+    int dy = 0;
+    int food_x = 5;
+    int food_y = 5;
+    bool game_over = false;
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis_x(1, width - 2);
+    std::uniform_int_distribution<> dis_y(1, height - 2);
+
+    // Main Game Loop
+    while (!game_over) {
+        // Read non-blocking input from client socket
+        char buf[16] = {0};
+        ssize_t bytes_read = read(client_fd, buf, sizeof(buf) - 1);
+        if (bytes_read > 0) {
+            char cmd = buf[0];
+            if (cmd == 'w' && dy == 0) { dx = 0; dy = -1; }
+            else if (cmd == 's' && dy == 0) { dx = 0; dy = 1; }
+            else if (cmd == 'a' && dx == 0) { dx = -1; dy = 0; }
+            else if (cmd == 'd' && dx == 0) { dx = 1; dy = 0; }
+            else if (cmd == 'q') { break; }
+        }
+
+        // Update Snake Position
+        std::pair<int, int> head = snake.front();
+        std::pair<int, int> new_head = {head.first + dx, head.second + dy};
+
+        // Check Wall Collision
+        if (new_head.first <= 0 || new_head.first >= width - 1 || new_head.second <= 0 || new_head.second >= height - 1) {
+            game_over = true;
+            break;
+        }
+
+        // Check Self Collision
+        for (const auto& seg : snake) {
+            if (seg == new_head) {
+                game_over = true;
+                break;
+            }
+        }
+        if (game_over) break;
+
+        snake.push_front(new_head);
+
+        // Check Food Collision
+        if (new_head.first == food_x && new_head.second == food_y) {
+            // Generate new food ensuring it doesn't land on the snake
+            bool collision = false;
+            do {
+                food_x = dis_x(gen);
+                food_y = dis_y(gen);
+                collision = false;
+                
+                // Check against every segment of the snake
+                for (const auto& seg : snake) {
+                    if (seg.first == food_x && seg.second == food_y) {
+                        collision = true; // Oops, hit the snake! Try again.
+                        break;
+                    }
+                }
+            } while (collision);
+        } else {
+            snake.pop_back(); // Remove tail if no food eaten
+        }
+
+        // Render Frame using ANSI Escape Sequences (`\033[H` moves cursor to top-left without flicker)
+        std::string screen = "\033[H";
+        screen += "=== C++ TCP SNAKE ARCADE ===\r\n";
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                if (x == 0 || x == width - 1 || y == 0 || y == height - 1) {
+                    screen += "#"; // Walls
+                } else if (x == food_x && y == food_y) {
+                    screen += "*"; // Food
+                } else {
+                    bool is_body = false;
+                    for (const auto& seg : snake) {
+                        if (seg.first == x && seg.second == y) {
+                            is_body = true;
+                            break;
+                        }
+                    }
+                    screen += (is_body ? "O" : " "); // Snake body or empty space
+                }
+            }
+            screen += "\r\n";
+        }
+        screen += "Score: " + std::to_string((snake.size() - 3) * 10) + " | Press 'q' to quit\r\n";
+
+        // Push frame over TCP socket to the client terminal
+        ssize_t written = write(client_fd, screen.c_str(), screen.size());
+        if (written <= 0) {
+            break; // Client disconnected abruptly
+        }
+    }
+
+    // Game Over Cleanup
+    std::string game_over_msg = "\r\n\033[1;31mGAME OVER!\033[0m Final Score: " + std::to_string((snake.size() - 3) * 10) + "\r\nConnection closing.\r\n";
+    write(client_fd, game_over_msg.c_str(), game_over_msg.size());
+    close(client_fd);
+    safetyLog("[Server] Snake session ended, client socket closed."); 
+}
+
+// (Keep your TcpServer constructor, destructor, and safetyLog methods as they are...)
+void TcpServer::handleClient(int client_fd, sockaddr_in client_addr)
+{
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+    safetyLog(std::string("[Server] Client connected: ") + client_ip);
+
+    // 1. Send the Arcade Lobby Menu
+    std::string menu = 
+        "\033[2J\033[H"
+        "==============================\r\n"
+        "    C++ MULTI-THREADED ARCADE   \r\n"
+        "==============================\r\n"
+        "  1. Snake Game\r\n"
+        "  2. Tetris Game (Coming Next!)\r\n"
+        "  q. Quit\r\n"
+        "------------------------------\r\n"
+        "Select an option (1-2): ";
+    
+    write(client_fd, menu.c_str(), menu.size());
+
+    // 2. Read client choice
+    char choice_buf[16] = {0};
+    ssize_t bytes_read = read(client_fd, choice_buf, sizeof(choice_buf) - 1);
+    
+    if (bytes_read > 0) {
+        char choice = choice_buf[0];
+        
+        if (choice == '1') {
+            safetyLog("[Server] Client selected Snake.");
+            runSnakeGame(client_fd);
+        } 
+        else if (choice == '2') {
+            safetyLog("[Server] Client selected Tetris.");
+            runTetrisGame(client_fd); // We will build this next!
+        } 
+        else {
+            std::string goodbye = "Exiting arcade. Goodbye!\r\n";
+            write(client_fd, goodbye.c_str(), goodbye.size());
+        }
+    }
+
+    close(client_fd);
+    safetyLog("[Server] Client session terminated, socket closed.");
+}
+
+/* HTTP website
 void TcpServer::handleClient(int client_fd, sockaddr_in client_addr)
 {
     char client_ip[INET_ADDRSTRLEN];
@@ -136,3 +315,4 @@ void TcpServer::handleClient(int client_fd, sockaddr_in client_addr)
     close(client_fd);
     safetyLog("[Server] Client socket closed.");
 }
+*/
