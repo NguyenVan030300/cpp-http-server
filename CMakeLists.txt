@@ -20,6 +20,7 @@ include_directories(include)
 add_executable(server_app
     src/main.cpp
     src/httpsProject.cpp
+    src/Tetris.cpp
 )
 
 #sprint 3:
@@ -41,6 +42,7 @@ enable_testing()
 add_executable(unit_tests
     src/httpsProject.cpp
     test/httpsProject.cpp
+    src/Tetris.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE gtest_main)
